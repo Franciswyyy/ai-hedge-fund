@@ -1,26 +1,28 @@
 import datetime
 import logging
 import os
+import time
+
 import pandas as pd
 import requests
-import time
 
 logger = logging.getLogger(__name__)
 
 from src.data.cache import get_cache
 from src.data.models import (
+    CompanyFactsResponse,
     CompanyNews,
     CompanyNewsResponse,
     FinancialMetrics,
     FinancialMetricsResponse,
-    Price,
-    PriceResponse,
-    LineItem,
-    LineItemResponse,
     InsiderTrade,
     InsiderTradeResponse,
-    CompanyFactsResponse,
+    LineItem,
+    LineItemResponse,
+    Price,
+    PriceResponse,
 )
+from src.tools.akshare_prices import get_a_share_prices, is_a_share_ticker
 
 # Global cache instance
 _cache = get_cache()
@@ -62,12 +64,22 @@ def _make_api_request(url: str, headers: dict, method: str = "GET", json_data: d
 
 def get_prices(ticker: str, start_date: str, end_date: str, api_key: str = None) -> list[Price]:
     """Fetch price data from cache or API."""
+    normalized_ticker = ticker.strip().upper()
+
     # Create a cache key that includes all parameters to ensure exact matches
-    cache_key = f"{ticker}_{start_date}_{end_date}"
+    cache_key = f"{normalized_ticker}_{start_date}_{end_date}"
     
     # Check cache first - simple exact match
     if cached_data := _cache.get_prices(cache_key):
         return [Price(**price) for price in cached_data]
+
+    # A-share tickers use the zero-key AKShare adapter. Other markets retain
+    # the original Financial Datasets behavior.
+    if is_a_share_ticker(normalized_ticker):
+        prices = get_a_share_prices(normalized_ticker, start_date, end_date)
+        if prices:
+            _cache.set_prices(cache_key, [price.model_dump() for price in prices])
+        return prices
 
     # If not in cache, fetch from API
     headers = {}
@@ -75,7 +87,7 @@ def get_prices(ticker: str, start_date: str, end_date: str, api_key: str = None)
     if financial_api_key:
         headers["X-API-KEY"] = financial_api_key
 
-    url = f"https://api.financialdatasets.ai/prices/?ticker={ticker}&interval=day&interval_multiplier=1&start_date={start_date}&end_date={end_date}"
+    url = f"https://api.financialdatasets.ai/prices/?ticker={normalized_ticker}&interval=day&interval_multiplier=1&start_date={start_date}&end_date={end_date}"
     response = _make_api_request(url, headers)
     if response.status_code != 200:
         return []
@@ -85,7 +97,7 @@ def get_prices(ticker: str, start_date: str, end_date: str, api_key: str = None)
         price_response = PriceResponse(**response.json())
         prices = price_response.prices
     except Exception as e:
-        logger.warning("Failed to parse price response for %s: %s", ticker, e)
+        logger.warning("Failed to parse price response for %s: %s", normalized_ticker, e)
         return []
 
     if not prices:
